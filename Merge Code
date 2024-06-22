@@ -1,0 +1,426 @@
+//wmerge code
+#include <FuzzyRule.h>
+#include <FuzzyComposition.h>
+#include <Fuzzy.h>
+#include <FuzzyRuleConsequent.h>
+#include <FuzzyOutput.h>
+#include <FuzzyInput.h>
+#include <FuzzyIO.h>
+#include <FuzzySet.h>
+#include <FuzzyRuleAntecedent.h>
+
+#include <dht.h>
+dht DHT;
+
+#define DHT22_PIN 6
+#define pump_pin 4
+
+Fuzzy* fuzzy = new Fuzzy();
+
+//TODO: Confirm if this is true with the plant we are handling
+//Fuzzification for Temperature
+FuzzySet* cold = new FuzzySet(0, 0, 20, 30);
+FuzzySet* normal = new FuzzySet(25, 30, 30, 35); 
+FuzzySet* hot = new FuzzySet(30, 35, 40, 40); 
+
+//Fuzzification for Humidity
+FuzzySet* dry = new FuzzySet(0, 0, 23, 38);
+FuzzySet* damp = new FuzzySet(23, 38, 38, 71);
+FuzzySet* humid = new FuzzySet(57, 71, 95, 95);
+
+//Fuzzification for Soil Moisture
+FuzzySet* dried = new FuzzySet(3, 3, 5, 10);
+FuzzySet* moist = new FuzzySet(30, 50, 50, 70);
+FuzzySet* wet = new FuzzySet(60, 80, 100, 100);
+
+// Fuzzification for Pump Action
+FuzzySet* pumpOn = new FuzzySet(1, 1, 1, 1);
+FuzzySet* pumpOff = new FuzzySet(0, 0, 0, 0);
+
+
+//Variables
+int chk;
+int hum;
+int temp;
+float msture;
+int msturePrcnt; 
+
+//Moisture Calibration
+const int dryValue = 490;
+const int wetValue = 260;
+
+#define BLYNK_TEMPLATE_ID "TMPL6TFGTUhJL"
+#define BLYNK_TEMPLATE_NAME "Nae"
+#include <SoftwareSerial.h>
+#include <stdlib.h>
+#include <ESP8266_Lib.h>
+#include <BlynkSimpleShieldEsp8266.h>
+
+// Your WiFi credentials.
+char ssid[] = "DecoM4Temp";
+char pass[] = "@Primo042303!";
+
+// Blynk credentials
+
+#define BLYNK_AUTH_TOKEN "oH0OrSSdmvq2-OsP-cdTKdO2jguMGIcE"
+
+#define BLYNK_PRINT Serial
+
+// Software Serial for ESP8266
+SoftwareSerial EspSerial(2, 3); //TX,RX
+ESP8266 wifi(&EspSerial);
+
+
+// Variables for connection attempts
+unsigned char check_connection = 0;
+unsigned char times_check = 0;
+
+// Blynk Timer
+BlynkTimer timer;
+
+
+void setup() {
+  //--------- Wifi ---------
+  Serial.begin(115200);
+  EspSerial.begin(115200); // Set the ESP8266 baud rate to 115200
+
+  // Reset and configure the ESP8266
+  EspSerial.println("AT+RST");
+  delay(1000);
+  EspSerial.println("AT+GMR");
+  delay(1000);
+  EspSerial.println("AT+CWMODE=1"); // Set mode to Station mode (client)
+  delay(1000);
+
+  // Connect to WiFi and Blynk
+  connectToWiFi();
+  Blynk.begin(BLYNK_AUTH_TOKEN, wifi, ssid, pass);
+  
+  // Configure timer events
+  timer.setInterval(5000L, updateDataTimer);  // Update sensor data every 10 seconds
+  
+  //--------- Main App ---------
+  pinMode(pump_pin, OUTPUT);
+  digitalWrite(pump_pin, LOW); // Ensure the pump is initially off
+
+  //FuzzyInput Variables
+  //Temp variables with 0 to 40 as input
+  FuzzyInput* temperature = new FuzzyInput(1);
+
+  temperature -> addFuzzySet(cold);
+  temperature -> addFuzzySet(normal);
+  temperature -> addFuzzySet(hot);
+  fuzzy->addFuzzyInput(temperature);
+
+  //Humidity variables with 0 to 95 as input
+  FuzzyInput* humidity = new FuzzyInput(2);
+
+  humidity -> addFuzzySet(dry);
+  humidity -> addFuzzySet(damp);
+  humidity -> addFuzzySet(humid);
+  fuzzy->addFuzzyInput(humidity);
+
+  //Moisture variables with 0 to 100 as input
+  FuzzyInput* moisture = new FuzzyInput(3);
+
+  moisture -> addFuzzySet(dried);
+  moisture -> addFuzzySet(moist);
+  moisture -> addFuzzySet(wet);
+  fuzzy->addFuzzyInput(moisture);
+
+  // FuzzyOutput for pump control
+  FuzzyOutput* pump = new FuzzyOutput(1);
+
+  pump->addFuzzySet(pumpOn);
+  pump->addFuzzySet(pumpOff);
+  fuzzy->addFuzzyOutput(pump);
+
+  //Rules
+  //Consequent for pump on and pump off
+  FuzzyRuleConsequent* thenPumpOn = new FuzzyRuleConsequent();
+  thenPumpOn->addOutput(pumpOn);
+
+  FuzzyRuleConsequent* thenPumpOff = new FuzzyRuleConsequent();
+  thenPumpOff->addOutput(pumpOff);
+
+  FuzzyRuleAntecedent* rule1 = new FuzzyRuleAntecedent();
+  rule1->joinWithAND(dried, cold);
+  FuzzyRuleAntecedent* rule2 = new FuzzyRuleAntecedent();
+  rule2->joinWithAND(rule1, humid);
+  FuzzyRule* fuzzyRule1 = new FuzzyRule(1, rule2, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule1);
+
+  FuzzyRuleAntecedent* rule3 = new FuzzyRuleAntecedent();
+  rule3->joinWithAND(rule1, damp);
+  FuzzyRule* fuzzyRule2 = new FuzzyRule(2, rule3, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule2);
+
+  FuzzyRuleAntecedent* rule4 = new FuzzyRuleAntecedent();
+  rule4->joinWithAND(rule1, dry);
+  FuzzyRule* fuzzyRule3 = new FuzzyRule(3, rule4, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule3);
+
+  FuzzyRuleAntecedent* rule5 = new FuzzyRuleAntecedent();
+  rule5->joinWithAND(dried, normal);
+  FuzzyRuleAntecedent* rule6 = new FuzzyRuleAntecedent();
+  rule6->joinWithAND(rule5, humid);
+  FuzzyRule* fuzzyRule4 = new FuzzyRule(4, rule6, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule4);
+
+  FuzzyRuleAntecedent* rule7 = new FuzzyRuleAntecedent();
+  rule7->joinWithAND(rule5, damp);
+  FuzzyRule* fuzzyRule5 = new FuzzyRule(5, rule7, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule5);
+
+  FuzzyRuleAntecedent* rule8 = new FuzzyRuleAntecedent();
+  rule8->joinWithAND(rule5, dry);
+  FuzzyRule* fuzzyRule6 = new FuzzyRule(6, rule8, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule6);
+
+  FuzzyRuleAntecedent* rule9 = new FuzzyRuleAntecedent();
+  rule9->joinWithAND(dried, hot);
+  FuzzyRuleAntecedent* rule10 = new FuzzyRuleAntecedent();
+  rule10->joinWithAND(rule9, humid);
+  FuzzyRule* fuzzyRule7 = new FuzzyRule(7, rule10, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule7);
+
+  FuzzyRuleAntecedent* rule11 = new FuzzyRuleAntecedent();
+  rule11->joinWithAND(rule9, damp);
+  FuzzyRule* fuzzyRule8 = new FuzzyRule(8, rule11, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule8);
+
+  FuzzyRuleAntecedent* rule12 = new FuzzyRuleAntecedent();
+  rule12->joinWithAND(rule9, dry);
+  FuzzyRule* fuzzyRule9 = new FuzzyRule(9, rule12, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule9);
+
+  FuzzyRuleAntecedent* rule13 = new FuzzyRuleAntecedent();
+  rule13->joinWithAND(moist, cold);
+  FuzzyRuleAntecedent* rule14 = new FuzzyRuleAntecedent();
+  rule14->joinWithAND(rule13, humid);
+  FuzzyRule* fuzzyRule10 = new FuzzyRule(10, rule14, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule10);
+
+  FuzzyRuleAntecedent* rule15 = new FuzzyRuleAntecedent();
+  rule15->joinWithAND(rule13, damp);
+  FuzzyRule* fuzzyRule11 = new FuzzyRule(11, rule15, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule11);
+
+  FuzzyRuleAntecedent* rule16 = new FuzzyRuleAntecedent();
+  rule16->joinWithAND(rule13, dry);
+  FuzzyRule* fuzzyRule12 = new FuzzyRule(12, rule16, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule12);
+
+  FuzzyRuleAntecedent* rule17 = new FuzzyRuleAntecedent();
+  rule17->joinWithAND(moist, normal);
+  FuzzyRuleAntecedent* rule18 = new FuzzyRuleAntecedent();
+  rule18->joinWithAND(rule17, humid);
+  FuzzyRule* fuzzyRule13 = new FuzzyRule(13, rule18, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule13);
+
+  FuzzyRuleAntecedent* rule19 = new FuzzyRuleAntecedent();
+  rule19->joinWithAND(rule17, damp);
+  FuzzyRule* fuzzyRule14 = new FuzzyRule(14, rule19, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule14);
+  
+  FuzzyRuleAntecedent* rule20 = new FuzzyRuleAntecedent();
+  rule20->joinWithAND(rule17, dry);
+  FuzzyRule* fuzzyRule15 = new FuzzyRule(15, rule20, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule15);
+
+  FuzzyRuleAntecedent* rule21 = new FuzzyRuleAntecedent();
+  rule21->joinWithAND(moist, hot);
+  FuzzyRuleAntecedent* rule22 = new FuzzyRuleAntecedent();
+  rule22->joinWithAND(rule21, humid);
+  FuzzyRule* fuzzyRule16 = new FuzzyRule(16, rule22, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule16);
+
+  FuzzyRuleAntecedent* rule23 = new FuzzyRuleAntecedent();
+  rule23->joinWithAND(rule21, damp);
+  FuzzyRule* fuzzyRule17 = new FuzzyRule(17, rule23, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule17);
+
+  FuzzyRuleAntecedent* rule24 = new FuzzyRuleAntecedent();
+  rule24->joinWithAND(rule21, dry);
+  FuzzyRule* fuzzyRule18 = new FuzzyRule(18, rule24, thenPumpOn);
+  fuzzy->addFuzzyRule(fuzzyRule18);
+
+  FuzzyRuleAntecedent* rule25 = new FuzzyRuleAntecedent();
+  rule25->joinWithAND(wet, cold);
+  FuzzyRuleAntecedent* rule26 = new FuzzyRuleAntecedent();
+  rule26->joinWithAND(rule25, humid);
+  FuzzyRule* fuzzyRule19 = new FuzzyRule(19, rule26, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule19);
+
+  FuzzyRuleAntecedent* rule27 = new FuzzyRuleAntecedent();
+  rule27->joinWithAND(rule25, damp);
+  FuzzyRule* fuzzyRule20 = new FuzzyRule(20, rule27, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule20);
+
+  FuzzyRuleAntecedent* rule28 = new FuzzyRuleAntecedent();
+  rule28->joinWithAND(rule25, dry);
+  FuzzyRule* fuzzyRule21 = new FuzzyRule(21, rule28, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule21);
+
+  FuzzyRuleAntecedent* rule29 = new FuzzyRuleAntecedent();
+  rule29->joinWithAND(wet, normal);
+  FuzzyRuleAntecedent* rule30 = new FuzzyRuleAntecedent();
+  rule30->joinWithAND(rule29, humid);
+  FuzzyRule* fuzzyRule22 = new FuzzyRule(22, rule30, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule22);
+
+  FuzzyRuleAntecedent* rule31 = new FuzzyRuleAntecedent();
+  rule31->joinWithAND(rule29, damp);
+  FuzzyRule* fuzzyRule23 = new FuzzyRule(23, rule31, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule23);
+
+  FuzzyRuleAntecedent* rule32 = new FuzzyRuleAntecedent();
+  rule32->joinWithAND(rule29, dry);
+  FuzzyRule* fuzzyRule24 = new FuzzyRule(24, rule32, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule24);
+
+  FuzzyRuleAntecedent* rule33 = new FuzzyRuleAntecedent();
+  rule33->joinWithAND(wet, hot);
+  FuzzyRuleAntecedent* rule34 = new FuzzyRuleAntecedent();
+  rule34->joinWithAND(rule33, humid);
+  FuzzyRule* fuzzyRule25 = new FuzzyRule(25, rule34, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule25);
+
+  FuzzyRuleAntecedent* rule35 = new FuzzyRuleAntecedent();
+  rule35->joinWithAND(rule33, damp);
+  FuzzyRule* fuzzyRule26 = new FuzzyRule(26, rule35, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule26);
+
+  FuzzyRuleAntecedent* rule36 = new FuzzyRuleAntecedent();
+  rule36->joinWithAND(rule33, dry);
+  FuzzyRule* fuzzyRule27 = new FuzzyRule(27, rule36, thenPumpOff);
+  fuzzy->addFuzzyRule(fuzzyRule27);
+}
+
+void loop() {
+  if (check_connection) {
+    if (Blynk.connected()) {
+      Serial.println("Connected to Blynk server.");
+      Blynk.run();
+	  timer.run();
+      delay(1000);
+    } else {
+      Serial.println("Disconnected from Blynk server. Reconnecting...");
+      Blynk.connect();
+	  timer.run();
+    }
+  } else {
+    Serial.println("Not connected to WiFi. Attempting to connect...");
+    connectToWiFi();
+  }
+  
+  // Main App
+  chk = DHT.read22(DHT22_PIN);
+  hum  = DHT.humidity;
+  temp = DHT.temperature; 
+  int value = analogRead(A0);
+
+  msture = value * 500.0 / 1023.0;
+  msturePrcnt = map(msture, dryValue, wetValue, 0, 100);
+
+  Serial.print("Moisture (raw): ");
+  Serial.println(msture);
+
+
+  
+  //prints in serial monitor
+  Serial.print(msture);
+  Serial.print("Temperature = ");
+  Serial.print(temp);
+  Serial.println("°C");
+
+  Serial.print("Humidity = ");
+  Serial.print(hum);
+  Serial.println("%");
+  
+  Serial.print("Moisture: ");
+  Serial.print(msturePrcnt);
+  Serial.println("%");
+  
+
+  fuzzy->setInput(1, temp);
+  fuzzy->setInput(2, hum);
+  fuzzy->setInput(3, msturePrcnt);
+  fuzzy->fuzzify();
+  int output = fuzzy->defuzzify(1);
+  //no idea how the relay works yet since it's untestest
+  //but my plan is to control it with output since output only outputs 0 and 1
+
+  delay(1000);
+  Serial.print(output);
+  if (output == 1) {
+    digitalWrite(pump_pin, HIGH); // Turn on the pump
+    Serial.println("ON");
+  } else {
+    digitalWrite(pump_pin, LOW); // Turn off the pump
+    Serial.println("OFF");
+  }
+}
+
+
+// This function is called every time the device is connected to the Blynk.Cloud
+BLYNK_CONNECTED() {
+  Blynk.syncVirtual(V0);  // Moisture
+  Blynk.syncVirtual(V1);  // Temperature
+  Blynk.syncVirtual(V2);  // Humidity
+}
+
+// This function is called every time the Virtual Pin 0 state changes
+BLYNK_WRITE(V0) {
+  Serial.print("Moisture change");
+}
+
+// This function is called every time the Virtual Pin 1 state changes
+BLYNK_WRITE(V1) {
+  Serial.print("Temparature change");
+}
+
+// This function is called every time the Virtual Pin 2 state changes
+BLYNK_WRITE(V2) {
+  Serial.print("Humidity change");
+}
+
+void updateDataTimer() {
+  sendData();
+}
+
+// Function to send sensor data to Blynk app
+void sendData() {
+  // Send data to blynk
+  Blynk.virtualWrite(V0, msture);
+  Blynk.virtualWrite(V1, temp);
+  Blynk.virtualWrite(V2, hum);
+}
+
+
+void connectToWiFi() {
+  Serial.println("Connecting to WiFi");
+
+  while (check_connection == 0) {
+    Serial.print(".");
+    EspSerial.println("AT+CWJAP=\"" + String(ssid) + "\",\"" + String(pass) + "\"");
+    EspSerial.setTimeout(10000); // 10 seconds timeout
+
+    if (EspSerial.find("WIFI CONNECTED")) {
+      Serial.println("WIFI CONNECTED");
+      check_connection = 1;
+    } else {
+      Serial.println("Failed to connect. Retrying...");
+      times_check++;
+      if (times_check > 3) {
+        Serial.println("Unable to connect to WiFi. Restarting...");
+        times_check = 0;
+        EspSerial.println("AT+RST");
+        delay(5000);
+      }
+    }
+    delay(1000); // Delay before retrying
+  }
+}
+//WORKING WIFI WITH BLYNK
+  
