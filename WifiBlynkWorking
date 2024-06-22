@@ -1,0 +1,85 @@
+//wIFI CODE BLYNK
+
+#define BLYNK_TEMPLATE_ID "TMPL6TFGTUhJL"
+#define BLYNK_TEMPLATE_NAME "Nae"
+#include <SoftwareSerial.h>
+#include <stdlib.h>
+#include <ESP8266_Lib.h>
+#include <BlynkSimpleShieldEsp8266.h>
+
+// Your WiFi credentials.
+char ssid[] = "MCMDOMAIN";
+char pass[] = "VivaMCM!";
+
+// Blynk credentials
+
+#define BLYNK_AUTH_TOKEN "oH0OrSSdmvq2-OsP-cdTKdO2jguMGIcE"
+
+#define BLYNK_PRINT Serial
+
+// Software Serial for ESP8266
+SoftwareSerial EspSerial(2, 3); // RX, TX
+ESP8266 wifi(&EspSerial);
+
+// Variables for connection attempts
+unsigned char check_connection = 0;
+unsigned char times_check = 0;
+
+void setup() {
+  // Debug console
+  Serial.begin(115200);
+  EspSerial.begin(115200); // Set the ESP8266 baud rate to 115200
+
+  // Reset and configure the ESP8266
+  EspSerial.println("AT+RST");
+  delay(1000);
+  EspSerial.println("AT+GMR");
+  delay(1000);
+  EspSerial.println("AT+CWMODE=1"); // Set mode to Station mode (client)
+  delay(1000);
+
+  // Connect to WiFi and Blynk
+  connectToWiFi();
+  Blynk.begin(BLYNK_AUTH_TOKEN, wifi, ssid, pass);
+}
+
+void loop() {
+  if (check_connection) {
+    if (Blynk.connected()) {
+      Serial.println("Connected to Blynk server.");
+      Blynk.run();
+    } else {
+      Serial.println("Disconnected from Blynk server. Reconnecting...");
+      Blynk.connect();
+    }
+  } else {
+    Serial.println("Not connected to WiFi. Attempting to connect...");
+    connectToWiFi();
+  }
+}
+
+void connectToWiFi() {
+  Serial.println("Connecting to WiFi");
+
+  while (check_connection == 0) {
+    Serial.print(".");
+    EspSerial.println("AT+CWJAP=\"" + String(ssid) + "\",\"" + String(pass) + "\"");
+    EspSerial.setTimeout(10000); // 10 seconds timeout
+
+    if (EspSerial.find("WIFI CONNECTED")) {
+      Serial.println("WIFI CONNECTED");
+      check_connection = 1;
+    } else {
+      Serial.println("Failed to connect. Retrying...");
+      times_check++;
+      if (times_check > 3) {
+        Serial.println("Unable to connect to WiFi. Restarting...");
+        times_check = 0;
+        EspSerial.println("AT+RST");
+        delay(5000);
+      }
+    }
+    delay(1000); // Delay before retrying
+  }
+}
+//WORKING WIFI WITH BLYNK
